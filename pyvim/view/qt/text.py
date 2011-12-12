@@ -1,4 +1,5 @@
 import os
+import io
 import sys
 import stat
 import codecs
@@ -14,10 +15,17 @@ bom_dict = {
 	"UTF-32-BE": codecs.BOM_UTF32_BE,
 }
 
-class Editor(QAbstractScrollArea):
+class Text(QAbstractScrollArea):
 	def __init__(self, parent=None):
 		super().__init__(parent)
 
+		self._font = QFont("Courier New", 12)
+		self.background = Qt.white
+		self.color = Qt.black
+		self.caret_background = Qt.black
+		self.caret_color = Qt.white
+		self.selected_background = Qt.blue
+		self.selected_color = Qt.white
 		self.document = Document()
 		self.init()
 
@@ -39,16 +47,24 @@ class Editor(QAbstractScrollArea):
 		vbar = self.verticalScrollBar()
 		vbar.setMaximum(self.document.rows)
 		self._top = 0
+		self.pos = (0, 0)
+		self.dpos = (0, 0)
+		self.lefttop = (0, 0)
 
 		self.setFont(settings.DEFAULT_FONT)
 
 	def char_metrics(self):
-		fm = QFontMetrics(self.font())
+		fm = QFontMetrics(self._font)
 		return (fm.width("M"), fm.height())
 
 	def test(self):
 		self.document.open("d:/text.py")
 		self.verticalScrollBar().setMaximum(self.document.rows)
+
+	def draw_block(self, x, y, w, h):
+		painter = QPainter(self.viewport())
+		painter.setBrush(self.caret_background)
+		painter.drawRect(x, y, w, h)
 
 	# Overload
 	def scrollContentsBy(self, dx, dy):
@@ -59,10 +75,13 @@ class Editor(QAbstractScrollArea):
 	def paintEvent(self, event=None):
 		painter = QPainter(self.viewport())
 		evr = event.rect()
-		width, height = self.char_metrics()
 		max_width = evr.width()
 		max_height = evr.height()
 
+		painter.fillRect(0, 0, max_width, max_height, self.background)
+		painter.setPen(self.color)
+		painter.setFont(self._font)
+		width, height = self.char_metrics()
 		row = self.top
 		total = self.document.rows
 		y = 0
@@ -71,8 +90,6 @@ class Editor(QAbstractScrollArea):
 		opt.setWrapMode(QTextOption.NoWrap)
 		while row < total and y < max_height:
 			line = self.document.lines[row]
-			if isinstance(line, Line):
-				line = line.text
 			for c in line:
 				rect = QRectF(x, y, width, height)
 				painter.drawText(rect, c, opt)
@@ -82,6 +99,7 @@ class Editor(QAbstractScrollArea):
 			row += 1
 			y += height
 			x = 0
+		self.draw_block(0, 0, width, height)
 
 class Line(object):
 	def __init__(self, initial_value="", newline=None, growsize=32):
@@ -89,6 +107,32 @@ class Line(object):
 		self.growsize = 32
 
 		self.init(initial_value)
+
+	def __getitem__(self, index):
+		if isinstance(index, int):
+			return self.read(index, 1)
+		elif isinstance(index, slice):
+			start = index.start if index.start is not None else 0
+			if index.stop is None:
+				return self.read(start)
+			else:
+				return self.read(start, index.stop - start)
+		else:
+			raise IndexError("Wrong index '%s'", index)
+
+	def __setitem__(self, index, value):
+		self.write(index, value)
+
+	def __len__(self):
+		return self.length
+
+	def __iter__(self):
+		current = 0
+		read = self.read
+		length = self.length
+		while current < length:
+			yield read(current, 1)
+			current += 1
 
 	def init(self, value):
 		self.length = len(value)
@@ -126,19 +170,21 @@ class Line(object):
 		buf.write(t)
 		self.gap_length = newsize - self.length
 
-	def read(self, pos, length):
-		if pos < self.gap_pos:
+	def read(self, pos, length = None):
+		length = length if length is not None else self.length - pos
+		gap_pos = self.gap_pos
+		if pos < gap_pos:
 			self.buf.seek(pos)
-			if pos + length <= self.gap_pos:
+			if pos + length <= gap_pos:
 				return self.buf.read(length)
 			else:
-				len1 = self.gap_pos-pos
+				len1 = gap_pos - pos
 				p1 = self.buf.read(len1)
-				self.buf.seek(self.gap_pos + self.gap_length)
-				p2 = self.buf.read(length-len1)
+				self.buf.seek(gap_pos + self.gap_length)
+				p2 = self.buf.read(length - len1)
 				return p1 + p2
 		else:
-			self.buf.seek(self.gap_length+pos)
+			self.buf.seek(self.gap_length + pos)
 			return self.buf.read(length)
 	
 	def write(self, pos, text):
