@@ -1,0 +1,2 @@
+Pyvim (developed 2011-12-12)
+	If you use the QAbstractScrollArea, you should use self.viewport().update() instead of self.update().

@@ -47,24 +47,64 @@ class Text(QAbstractScrollArea):
 		vbar = self.verticalScrollBar()
 		vbar.setMaximum(self.document.rows)
 		self._top = 0
-		self.pos = (0, 0)
-		self.dpos = (0, 0)
-		self.lefttop = (0, 0)
+		self.left = 0
+		self.row = 0
+		self.col = 0
+		self.drow = 0
+		self.dcol = 0
+
+		self.painted = False
+		self.paint_state = None
 
 		self.setFont(settings.DEFAULT_FONT)
+
+		self.caret_timer = QTimer(self)
+		self.connect(self.caret_timer, SIGNAL("timeout()"), self.update_caret)
+		#self.caret_timer.start(1000)
+		#self.caret_timer.event(self.blink_caret())
 
 	def char_metrics(self):
 		fm = QFontMetrics(self._font)
 		return (fm.width("M"), fm.height())
 
+	def char_at(self, row, col):
+		c = self.document.char_at(row, col)
+
 	def test(self):
 		self.document.open("d:/text.py")
 		self.verticalScrollBar().setMaximum(self.document.rows)
 
-	def draw_block(self, x, y, w, h):
+	def show_caret(self, row, col, w = None, char = ' ', shown=True):
 		painter = QPainter(self.viewport())
-		painter.setBrush(self.caret_background)
-		painter.drawRect(x, y, w, h)
+		width, height = self.char_metrics()
+		w = width if w is None else w
+		x = col * width
+		y = row * height
+		if shown:
+			painter.setBrush(self.caret_background)
+			painter.drawRect(x, y, w, height)
+		else:
+			painter.setBrush(self.background)
+			painter.drawRect(x, y, w, height)
+			rect = QRectF(x, y, w, height)
+			painter.drawText(rect, char)
+		self.caret_shown = shown
+
+	def draw_caret(self):
+		c = self.char_at(self.drow, self.dcol)
+		self.show_caret(self.row, self.col, char = c, shown = not self.caret_shown)
+
+	def update_caret(self):
+		self.paint_state = "update caret"
+		self.viewport().repaint()
+
+	def blink_caret(self):
+		timer = self.caret_timer
+		if timer.isActive():
+			timer.stop()
+		self.caret_shown = False
+		self.draw_caret()
+		self.caret_timer.start(400)
 
 	# Overload
 	def scrollContentsBy(self, dx, dy):
@@ -77,6 +117,11 @@ class Text(QAbstractScrollArea):
 		evr = event.rect()
 		max_width = evr.width()
 		max_height = evr.height()
+		print("here")
+
+		if self.paint_state == "update caret":
+			self.draw_caret()
+			return
 
 		painter.fillRect(0, 0, max_width, max_height, self.background)
 		painter.setPen(self.color)
@@ -99,7 +144,16 @@ class Text(QAbstractScrollArea):
 			row += 1
 			y += height
 			x = 0
-		self.draw_block(0, 0, width, height)
+
+		if not self.painted:
+			self.painted = True
+			self.blink_caret()
+	
+	def keyPressEvent(self, ev):
+		pass
+
+	def mousePressEvent(self, ev):
+		self.viewport().update()
 
 class Line(object):
 	def __init__(self, initial_value="", newline=None, growsize=32):
@@ -405,8 +459,8 @@ class Document(QObject):
 		line.append(lines[row+1])
 		lines.pop(row + 1)
 
-	def char(self):
-		pass
+	def char_at(self, row, col):
+		self.lines[row][col]
 
 	@property
 	def text(self):
