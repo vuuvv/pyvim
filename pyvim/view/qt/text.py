@@ -15,6 +15,19 @@ bom_dict = {
 	"UTF-32-BE": codecs.BOM_UTF32_BE,
 }
 
+class Char(object):
+	def __init__(self, display, type = "single", width = 1):
+		self.display = display
+		self.type = type
+		self.width = width
+
+listchars = {
+	"eol":		Char("\u00ac", "eol"),
+	"tab":		Char("\u2192 ", "tab"),
+	"eof":		Char("\u00b6", "eof"),
+	"trail":	Char("", "trail"),
+}
+
 class Text(QAbstractScrollArea):
 	def __init__(self, parent=None):
 		super().__init__(parent)
@@ -39,7 +52,7 @@ class Text(QAbstractScrollArea):
 		value = max(0, value)
 		self._top = value
 		self.verticalScrollBar().setValue(value)
-		self.viewport().update()
+		self.update_ui()
 
 	def init(self):
 		self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
@@ -52,76 +65,109 @@ class Text(QAbstractScrollArea):
 		self.col = 0
 		self.drow = 0
 		self.dcol = 0
-
-		self.painted = False
-		self.paint_state = None
+		self.tabstop = 8
 
 		self.setFont(settings.DEFAULT_FONT)
+		self.offscreen = None
+		self.offscreen_active = False
 
 		self.caret_timer = QTimer(self)
 		self.connect(self.caret_timer, SIGNAL("timeout()"), self.update_caret)
-		#self.caret_timer.start(1000)
-		#self.caret_timer.event(self.blink_caret())
 
 	def char_metrics(self):
 		fm = QFontMetrics(self._font)
 		return (fm.width("M"), fm.height())
 
 	def char_at(self, row, col):
-		c = self.document.char_at(row, col)
+		doc = self.document
+		line = doc.row(row)
+		rows = doc.rows
+		if (col == len(line)):
+			return listchars["eol"] if row < rows - 1 else listchars["eof"]
+		c = doc.char_at(row, col)
+		if (c == '\t'):
+			return listchars["tab"]
+		return Char(c)
 
 	def test(self):
 		self.document.open("d:/text.py")
 		self.verticalScrollBar().setMaximum(self.document.rows)
 
-	def show_caret(self, row, col, w = None, char = ' ', shown=True):
-		painter = QPainter(self.viewport())
-		width, height = self.char_metrics()
-		w = width if w is None else w
-		x = col * width
-		y = row * height
-		if shown:
-			painter.setBrush(self.caret_background)
-			painter.drawRect(x, y, w, height)
+	def next_char(self, col, char):
+		type, tabstop = char.type, self.tabstop
+		if type == "tab":
+			return (col // tabstop + 1) * tabstop
+		return col + char.width
+
+	def get_document_pos(self, row, col):
+		p = 0
+		i = 0
+		next_char, char_at = self.next_char, self.char_at
+		for i in range(len(self.document.row(row))):
+			p = next_char(p, char_at(row, i))
+			if p > col:
+				return i
+		return i
+
+	def get_screen_pos(self, row, col):
+		next_char, char_at = self.next_char, self.char_at
+		for i in range(col):
+			n = next_char(0, char_at(row, i))
+		return n
+
+	def draw_raw_char(self, painter, char, x, y, width, height, color, bg):
+		painter.fillRect(x, y, width, height, bg)
+		painter.setPen(color)
+		painter.drawText(QRectF(x, y, width, height), char)
+
+	def draw_char(self, painter, char, row, col, color, bg):
+		cw, ch = self.char_metrics()
+		x, y = (col - self.left) * cw, (row - self.top) * ch
+		width = cw * char.width
+		if char.type == "tab":
+			end = self.next_char(col, char)
+			self.draw_raw_char(painter, char.display[0], x, y, cw, ch, color, bg)
+			i = col + 1
+			x += cw
+			while i < end:
+				self.draw_raw_char(painter, char.display[1], x, y, cw, ch, color, bg)
+				x += cw
+				i += 1
+			return end
 		else:
-			painter.setBrush(self.background)
-			painter.drawRect(x, y, w, height)
-			rect = QRectF(x, y, w, height)
-			painter.drawText(rect, char)
+			self.draw_raw_char(painter, char.display, x, y, width, ch, color, bg)
+			return col + char.width
+
+	def draw_line(self, painter, row, start, end, color, bg):
+		line = self.document.row(row)
+		dcol = self.get_document_pos(row, start)
+		while start <= end:
+			start = self.draw_char(painter, self.char_at(row, start), row, start, color, bg)
+
+	def show_caret(self, painter, row, col, char, w = None, shown=True):
+		background = self.caret_background if shown else self.background
+		color = self.caret_color if shown else self.color
+		painter.setFont(self._font)
+		self.draw_char(painter, char, row, col, color, background)
 		self.caret_shown = shown
 
-	def draw_caret(self):
-		c = self.char_at(self.drow, self.dcol)
-		self.show_caret(self.row, self.col, char = c, shown = not self.caret_shown)
-
 	def update_caret(self):
-		self.paint_state = "update caret"
-		self.viewport().repaint()
+		c = self.char_at(self.drow, self.dcol)
+		self.show_caret(QPainter(self.offscreen), self.row, self.col, char = c, shown = not self.caret_shown)
+		self.viewport().update()
 
 	def blink_caret(self):
 		timer = self.caret_timer
 		if timer.isActive():
 			timer.stop()
 		self.caret_shown = False
-		self.draw_caret()
+		self.update_caret()
 		self.caret_timer.start(400)
 
-	# Overload
-	def scrollContentsBy(self, dx, dy):
-		if dx == 0 and dy == 0:
-			return
-		self.top -= dy
-
-	def paintEvent(self, event=None):
-		painter = QPainter(self.viewport())
-		evr = event.rect()
-		max_width = evr.width()
-		max_height = evr.height()
-		print("here")
-
-		if self.paint_state == "update caret":
-			self.draw_caret()
-			return
+	# paint on offscreen
+	def render(self, painter, rect):
+		max_width = rect.width()
+		max_height = rect.height()
 
 		painter.fillRect(0, 0, max_width, max_height, self.background)
 		painter.setPen(self.color)
@@ -134,21 +180,49 @@ class Text(QAbstractScrollArea):
 		opt = QTextOption()
 		opt.setWrapMode(QTextOption.NoWrap)
 		while row < total and y < max_height:
-			line = self.document.lines[row]
-			for c in line:
-				rect = QRectF(x, y, width, height)
-				painter.drawText(rect, c, opt)
-				x += width
-				if x > max_width:
-					break
+			length = len(self.document.row(row))
+			col = 0
+			dcol = self.get_document_pos(row, self.left)
+			while dcol <= length and col * width < self.left + max_width:
+				col = self.draw_char(painter, self.char_at(row, dcol), row, col, self.color, self.background)
+				dcol += 1
 			row += 1
 			y += height
-			x = 0
-
-		if not self.painted:
-			self.painted = True
-			self.blink_caret()
+			#x = 0
 	
+	def update_ui(self, rect = None):
+		if rect is None:
+			rect = self.viewport().rect()
+		#self.render(QPainter(self.offscreen), rect)
+		self.viewport().update(rect)
+
+	# Overload
+	def scrollContentsBy(self, dx, dy):
+		if dx == 0 and dy == 0:
+			return
+		self.top -= dy
+
+	def paintEvent(self, event=None):
+		print("paint event")
+		#if not self.offscreen_active:
+		#	evr = event.rect()
+		#	self.render(QPainter(self.offscreen), evr)
+		#	self.offscreen_active = True
+		#painter = QPainter(self.viewport())
+		#painter.drawPixmap(self.viewport().rect(), self.offscreen)
+		self.render(QPainter(self.viewport()), event.rect())
+	
+	def resizeEvent(self, ev):
+		self.offscreen = QPixmap(self.viewport().size())
+		self.offscreen_active = False
+
+	def showEvent(self, ev):
+		print("show event")
+		#self.blink_caret()
+
+	def hideEvent(self, ev):
+		self.caret_timer.stop()
+
 	def keyPressEvent(self, ev):
 		pass
 
@@ -460,7 +534,10 @@ class Document(QObject):
 		lines.pop(row + 1)
 
 	def char_at(self, row, col):
-		self.lines[row][col]
+		return self.lines[row][col]
+
+	def row(self, row):
+		return self.lines[row]
 
 	@property
 	def text(self):

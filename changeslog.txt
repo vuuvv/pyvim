@@ -1,2 +1,5 @@
 Pyvim (developed 2011-12-12)
 	If you use the QAbstractScrollArea, you should use self.viewport().update() instead of self.update().
+Pyvim (developed 2011-12-13)
+	TODO: a program manager the life cycle of python programs. A whole application, a middleware, a lib.
+	The Qt Widget have already implement a double buffer feature, if you add double buffer feature yourself, it make perfermence lower.
