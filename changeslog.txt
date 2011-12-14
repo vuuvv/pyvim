@@ -3,3 +3,5 @@ Pyvim (developed 2011-12-12)
 Pyvim (developed 2011-12-13)
 	TODO: a program manager the life cycle of python programs. A whole application, a middleware, a lib.
 	The Qt Widget have already implement a double buffer feature, if you add double buffer feature yourself, it make perfermence lower.
+Pyvim (developed 2011-12-14)
+	QWidget's method 'showFullScreen' only affects Window widget, eg. QDialog, QMainWindow.
