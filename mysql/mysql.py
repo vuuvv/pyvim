@@ -103,17 +103,17 @@ def create_scramble_buff():
 	import random
 	return ''.join([chr(random.randint(0, 255)) for _ in xrange(20)])
 
-def _scramble(password, seed):
-	"""taken from java jdbc driver, scrambles the password using the given seed
-	according to the mysql login protocol"""
-	stage1 = sha1(password).digest()
-	stage2 = sha1(stage1).digest()
-	md = sha1()
-	md.update(seed)
-	md.update(stage2)
-	#i love python :-):
-
-	return b''.join([(x ^ stage1[i]).to_bytes(1, stream_order) for i, x in enumerate(md.digest())])
+def _scramble(passwd, seed):
+	"""Scramble a password ready to send to MySQL"""
+	import struct
+	hash4 = None
+	hash1 = sha1(passwd).digest()
+	hash2 = sha1(hash1).digest() # Password as found in mysql.user()
+	hash3 = sha1(seed + hash2).digest()
+	xored = [ h1 ^ h3 for (h1,h3) in zip(hash1, hash3) ]
+	hash4 = struct.pack('20B', *xored)
+	
+	return hash4
 
 class ClientError(Exception):
 	@classmethod
@@ -129,21 +129,31 @@ class UnsupportVersion(Exception): pass
 class Packet(object):
 	def __init__(self, handler):
 		self.handler = handler
+		self.bind = None
 
 	def read_header(self):
 		self.stream.read_bytes(4, self.on_header)
 
 	def on_header(self, data):
-		length = int.from_bytes(data, 'little')
+		length = int.from_bytes(data[:3], stream_order)
 		self.stream.read_bytes(length, self.on_body)
 
 	def on_body(self, data):
-		self.handler(self.bind, data)
+		if self.bind is None:
+			self.handler(data)
+		else:
+			self.handler(self.bind, data)
 
 	def __call__(self, bind, stream):
 		self.stream = stream
 		self.bind = bind
 		self.read_header()
+
+	@staticmethod
+	def read(stream, handler):
+		p = Packet(handler)
+		p.stream = stream
+		p.read_header()
 
 class Stream(BytesIO):
 	def read_until(self, end):
@@ -160,6 +170,11 @@ class Stream(BytesIO):
 
 	def write_int(self, n, size = 1):
 		self.write(n.to_bytes(size, stream_order))
+
+	def pack(self, packet_number):
+		buf = self.getvalue()
+		length = len(buf)
+		return length.to_bytes(3, stream_order) + packet_number.to_bytes(1, stream_order) + buf
 
 	def eof(self):
 		return self.tell() == len(self.getvalue())
@@ -206,12 +221,10 @@ class Connection(object):
 		server_language = input.read_int(1)
 		server_status = input.read_int(2)
 		input.read(13)
-		print(scramble_buff)
 		if not input.eof():
 			scramble_buff += input.read_until(b'\0')
 		else:
 			raise UnsupportVersion("<4.1 auth not supported")
-		print(scramble_buff)
 
 		client_caps = server_caps
 
@@ -226,64 +239,38 @@ class Connection(object):
 			client_caps &= ~CAPS.CONNECT_WITH_DB
 
 		output = Stream()
-		#output.write_int(client_caps, 4)
-		#output.write_int(1 << 24, 4)
-		output.write(b'\r\xa2\x03\x00\x00\x00\x00@')
+		output.write_int(client_caps, 4)
+		output.write_int(1 << 24, 4)
 		if self.charset:
 			output.write_int(charset_map[self.charset.replace("-", "")])
 		else:
 			output.write_int(server_language)
 		output.write(b'\0' * 23)
-		output.write(b"root" + b'\0')
+		output.write(b"test" + b'\0')
 
+		#output.write(b'\0')
 		output.write_int(20)
-		output.write(_scramble(b"afohzjohzy", scramble_buff))
+		output.write(_scramble(b"test", scramble_buff))
 		output.write(b'\0')
 
-		print(len(_scramble(b"afohzjohzy", scramble_buff)))
-		print(output.getvalue())
-		print(len(output.getvalue()))
-		self.stream.write(b'\r\xa2\x03\x00', self.finish_handshake)#output.getvalue(), self.finish_handshake)
+		self.stream.write(output.pack(1), self.on_auth)
 
-	def finish_handshake(self):
-		print("here")
-		self.stream.read_bytes(4, self.on_header)
+	def on_auth(self):
+		Packet.read(self.stream, self.finish_auth)
 
-	def on_header(self, data):
-		length = int.from_bytes(data[0:3], stream_order)
-		self.stream.read_bytes(length, self.on_body)
+	def finish_auth(self, data):
+		io = Stream(data)
+		indicator = io.read_int(1)
+		if indicator == 0xff:
+			raise ClientLoginError.from_error_packet(io)
+		elif indicator == 0xfe:
+			raise UnsupportVersion("old password handshake not implemented")
+		print("OK")
 
-	def on_body(self, data):
-		print(data)
 
-#c = Connection()
-#c.connect()
-#ioloop.IOLoop.instance().start()
+c = Connection()
+c.connect()
+ioloop.IOLoop.instance().start()
 
-def _scramble_password(passwd, seed):
-	"""Scramble a password ready to send to MySQL"""
-	import struct
-	hash4 = None
-	hash1 = sha1(passwd).digest()
-	hash2 = sha1(hash1).digest() # Password as found in mysql.user()
-	hash3 = sha1(seed + hash2).digest()
-	xored = [ h1 ^ h3 for (h1,h3) in zip(hash1, hash3) ]
-	hash4 = struct.pack('20B', *xored)
-	
-	return hash4
-
-def test():
-	sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-	sock.connect(("localhost", 3306))
-	buf = sock.recv(100)[4:]
-	index = buf.find(b'\0') + 1
-	seed = buf[index+4: index+4+8] + buf[index+31: index+31+12]
-	_passwd = _scramble_password(b"afohzjohzy", seed)
-	print(seed)
-	#sock.send(b'\r\xa2\x03\x00\x00\x00\x00@!\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00root\x00\x14' + _passwd + b'\x00')
-	sock.send(b'\r\xa2\x03\x00')
-	print(sock.recv(1000))
-	sock.recv(100)
-
-test()
+#test()
 
