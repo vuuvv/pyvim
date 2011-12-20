@@ -1,9 +1,10 @@
 import socket
+import logging
 from io import BytesIO
 from hashlib import sha1
 
 from tornado import ioloop, iostream
-from tornado import stack_context
+from tornado.gen import engine, Task
 
 stream_order = "little"
 
@@ -119,41 +120,18 @@ class ClientError(Exception):
 	@classmethod
 	def from_error_packet(cls, io, skip = 8):
 		io.read(skip)
-		return cls(io.read())
+		return cls(io.read().decode())
 
 class ClientLoginError(ClientError): pass
 class ClientCommandError(ClientError): pass
 class ClientProgrammingError(ClientError): pass
 class UnsupportVersion(Exception): pass
 
-class Packet(object):
-	def __init__(self, handler):
-		self.handler = handler
-		self.bind = None
-
-	def read_header(self):
-		self.stream.read_bytes(4, self.on_header)
-
-	def on_header(self, data):
+def read_packet(stream, callback=None):
+	def _on_head(data):
 		length = int.from_bytes(data[:3], stream_order)
-		self.stream.read_bytes(length, self.on_body)
-
-	def on_body(self, data):
-		if self.bind is None:
-			self.handler(data)
-		else:
-			self.handler(self.bind, data)
-
-	def __call__(self, bind, stream):
-		self.stream = stream
-		self.bind = bind
-		self.read_header()
-
-	@staticmethod
-	def read(stream, handler):
-		p = Packet(handler)
-		p.stream = stream
-		p.read_header()
+		stream.read_bytes(length, callback)
+	stream.read_bytes(4, _on_head)
 
 class Stream(BytesIO):
 	def read_until(self, end):
@@ -195,11 +173,16 @@ class Connection(object):
 		self.stream.connect((self.host, self.port), self.on_connected)
 
 	def on_connected(self):
-		self.handshake(self, self.stream)
+		try:
+			self.handshake()
+		except Exception:
+			logging.error("", exc_info=True)
 
-	@Packet
-	def handshake(self, data):
-		input = Stream(data)
+	@engine
+	def handshake(self):
+		packet = yield Task(read_packet, self.stream)
+
+		input = Stream(packet)
 		self.protocol_version = input.read_int(1)
 		if self.protocol_version == 0xff:
 			raise ClientLoginError.from_error_packet(input, skip = 2)
@@ -253,20 +236,16 @@ class Connection(object):
 		output.write(_scramble(b"test", scramble_buff))
 		output.write(b'\0')
 
-		self.stream.write(output.pack(1), self.on_auth)
+		yield Task(self.stream.write, output.pack(1))
+		packet = yield Task(read_packet, self.stream)
 
-	def on_auth(self):
-		Packet.read(self.stream, self.finish_auth)
-
-	def finish_auth(self, data):
-		io = Stream(data)
-		indicator = io.read_int(1)
+		input = Stream(packet)
+		indicator = input.read_int(1)
 		if indicator == 0xff:
-			raise ClientLoginError.from_error_packet(io)
+			raise ClientLoginError.from_error_packet(input)
 		elif indicator == 0xfe:
 			raise UnsupportVersion("old password handshake not implemented")
 		print("OK")
-
 
 c = Connection()
 c.connect()
