@@ -158,30 +158,66 @@ class Stream(BytesIO):
 		return self.tell() == len(self.getvalue())
 
 class Connection(object):
-	def __init__(self, host='localhost', port=3306, user='', passwd=''):
-		self.host = host
-		self.port = port
-		self.user = user
-		self.passwd = passwd
-		self.database = None
-		self.charset = "utf8"
+	STATE_ERROR = -1
+	STATE_INIT = 0
+	STATE_CONNECTING = 1
+	STATE_CONNECTED = 2
+	STATE_CLOSING = 3
+	STATE_CLOSED = 4
 
+	def __init__(self):
+		self.state = self.STATE_INIT
+
+	@engine
+	def connect(self, host = "localhost", port = 3306, user = "", password = "", 
+			db = "", autocommit = None, charset = "utf8"):
+
+		assert type(host) == str, "make sure host is a string"
+
+		if host[0] == '/': #assume unix domain socket
+			addr = host
+		elif ':' in host:
+			host, port = host.split(':')
+			port = int(port)
+			addr = (host, port)
+		else:
+			addr = (host, port)
+		self.autocommit = autocommit
+
+		assert self.state == self.STATE_INIT, "make sure connection is not already connected or closed"
+
+		self.state = self.STATE_CONNECTING
 		sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 		self.stream = iostream.IOStream(sock)
 
-	def connect(self):
-		self.stream.connect((self.host, self.port), self.on_connected)
-
-	def on_connected(self):
 		try:
-			self.handshake()
+			yield Task(self.stream.connect, addr)
+			packet = yield Task(read_packet, self.stream)
+			yield Task(self.stream.write, self.prepare_handshake(packet, db, charset))
+			packet = yield Task(read_packet, self.stream)
+			self.check_handshake(packet)
+			self.state = self.STATE_CONNECTED
+		except ClientLoginError:
+			self.state = self.STATE_INIT
+			logging.error("Exception on login: ", exc_info=True)
 		except Exception:
-			logging.error("", exc_info=True)
+			self.state = self.STATE_ERROR
+			logging.error("Exception on login: ", exc_info=True)
 
 	@engine
-	def handshake(self):
-		packet = yield Task(read_packet, self.stream)
+	def command(self, cmd, cmd_text):
+		assert type(cmd_text) == str
+		assert self.state == self.STATE_CONNECTED
+		assert self._incommand, "overlapped commands not supported"
+		assert self.current_resultset, "overlapped commands not supported"
+		cmd_text = cmd_text.encode(self.charset)
+		output = Stream()
+		output.write_int(1, cmd)
+		output.write(cmd_text)
+		yield Task(self.stream.write, output.pack(0))
+		print((yield Task(read_packet, self.stream)))
 
+	def prepare_handshake(self, packet, user, password, db, charset):
 		input = Stream(packet)
 		self.protocol_version = input.read_int(1)
 		if self.protocol_version == 0xff:
@@ -216,39 +252,40 @@ class Connection(object):
 		client_caps &= ~CAPS.NO_SCHEMA
 		client_caps &= ~CAPS.SSL
 
-		if not server_caps & CAPS.CONNECT_WITH_DB and self.database:
+		if not server_caps & CAPS.CONNECT_WITH_DB and db:
 			raise UnsupportVersion("initial db given but not supported by server")
-		if not self.database:
+		if not db:
 			client_caps &= ~CAPS.CONNECT_WITH_DB
 
 		output = Stream()
 		output.write_int(client_caps, 4)
 		output.write_int(1 << 24, 4)
-		if self.charset:
-			output.write_int(charset_map[self.charset.replace("-", "")])
-		else:
-			output.write_int(server_language)
+
+		output.write_int(charset_map[charset.replace("-", "")])
+		self.charset = charset
+
 		output.write(b'\0' * 23)
-		output.write(b"test" + b'\0')
+		output.write(user.encode(charset) + b'\0')
 
 		#output.write(b'\0')
 		output.write_int(20)
-		output.write(_scramble(b"test", scramble_buff))
+		output.write(_scramble(password.encode(charset), scramble_buff))
 		output.write(b'\0')
 
-		yield Task(self.stream.write, output.pack(1))
-		packet = yield Task(read_packet, self.stream)
+		return output.pack(1)
 
+	def check_handshake(self, packet):
 		input = Stream(packet)
 		indicator = input.read_int(1)
 		if indicator == 0xff:
 			raise ClientLoginError.from_error_packet(input)
 		elif indicator == 0xfe:
 			raise UnsupportVersion("old password handshake not implemented")
-		print("OK")
 
 c = Connection()
-c.connect()
+c.connect(user="test", password="test")
+print("connected")
+c.command(COMMAND.QUERY, "use test")
 ioloop.IOLoop.instance().start()
 
 #test()

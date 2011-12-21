@@ -1,12 +1,18 @@
-def echo(value=None):
-	try:
-		print("Execution starts when 'next()' is called for the first time.")
-		yield 0
-		1/0
-	except:
-		print("ABCDEFG")
+import inspect
 
-g = echo()
-#print(g.send(None))
+def logger(msg):
+	print("logger:", msg)
+	print("called from %s:%d" % inspect.stack()[1][1:3])
+	print
+
+def client1():
+	logger("one")
+
+def client2():
+	logger("two")
+
+client1()
+client2()
+
 
 
